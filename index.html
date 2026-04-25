@@ -1950,33 +1950,26 @@ void main(){
   vec3 col=colorize(hue,t*.04)*(diffA+diffB+.2)+fresnel*colorize(hue+.4,t*.07)*(1.+BT);
   col*=(1.+BT*.8);
 
-// 18 3D BLOBS — (see above, unchanged)
+  gl_FragColor=vec4(clamp(col*BR,0.,1.),1.);}`,
 
 // 19 3D WORMHOLE — raymarched wormhole / hyperspace tunnel
 LUT_HEADER+`
 float wormSDF(vec3 p,float t,float b,float m){
-  // Twisted tube with bulge and audio-reactive radius
   float angle=atan(p.y,p.x);
   float twist=p.z*1.8+t*.6+b*2.;
   float twisted=angle-twist;
   vec2 rp=vec2(cos(twisted)*length(p.xy),sin(twisted)*length(p.xy));
   float base=.55+m*.12+sin(p.z*4.+t*2.)*b*.08;
   float tube=length(rp)-base;
-  // Internal rib structure
   float ribs=sin(p.z*18.+t*3.)*.025;
   return tube+ribs;
 }
-
 void main(){
   vec2 uv=(gl_FragCoord.xy/R-.5)*2.*ZM;uv.x*=R.x/R.y;
   float t=T*SP,b=B*SN,m=M*SN,tr=TR*SN;
-
-  // Camera flies forward through the wormhole
-  vec3 ro=vec3(sin(t*.18)*0.15, cos(t*.13)*0.15, t*1.2);
-  vec3 rd=normalize(vec3(uv, 1.4));
-
-  float dist=0.;bool hit=false;
-  float minD=1e9;
+  vec3 ro=vec3(sin(t*.18)*0.15,cos(t*.13)*0.15,t*1.2);
+  vec3 rd=normalize(vec3(uv,1.4));
+  float dist=0.;bool hit=false;float minD=1e9;
   for(int i=0;i<64;i++){
     float d=abs(wormSDF(ro+rd*dist,t,b,m));
     minD=min(minD,d);
@@ -1984,23 +1977,18 @@ void main(){
     if(dist>20.)break;
     dist+=max(d*.6,.005);
   }
-
   if(!hit){
-    // No wall hit — show far end glow
     float glow=exp(-minD*4.)*(1.+BT);
     gl_FragColor=vec4(colorize(.6+tr*.1,t*.05)*glow*BR,1.);
     return;
   }
-
   vec3 pos=ro+rd*dist;
-  float ang=atan(pos.y,pos.x);
+  float ang2=atan(pos.y,pos.x);
   float zf=fract(pos.z*.12+t*.08);
-  float stripe=sin(ang*10.+t*2.+b*4.)*.5+.5;
+  float stripe=sin(ang2*10.+t*2.+b*4.)*.5+.5;
   float pattern=zf*.5+stripe*.5;
-  // Edge glow from surface distance gradient
-  float glow=exp(-dist*.04)*(1.+BT*1.8);
-  vec3 col=colorize(pattern,t*.06+ang*.08)*glow;
-  // Rim highlight at tube edges
+  float glow2=exp(-dist*.04)*(1.+BT*1.8);
+  vec3 col=colorize(pattern,t*.06+ang2*.08)*glow2;
   float rim=exp(-abs(wormSDF(pos,t,b,m))*80.)*tr;
   col+=colorize(pattern+.3,t*.05)*rim;
   gl_FragColor=vec4(clamp(col*BR,0.,1.),1.);}`,
