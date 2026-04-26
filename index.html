@@ -637,12 +637,42 @@ let freqData, timeData;
 let beatVal=0, beatDecay=0.88, lastBass=0;
 let autoCycleTimer=null;
 
-// Mandelbrot zoom state — driven by pitch detection
+// Mandelbrot zoom state — driven by active MIDI notes
 let mbZoom = 1.0;      // current zoom (1 = full view)
 let mbZoomTarget = 1.0;
-let mbCx = -0.5, mbCy = 0.0;   // center: full-set centroid
-let mbCxT = -0.5, mbCyT = 0.0;
-// Interesting zoom targets mapped from pitch regions
+let mbCx = -0.5, mbCy = 0.0;   // current center
+let mbCxT = -0.5, mbCyT = 0.0; // target center
+
+// 24 points sampled along the Mandelbrot set's main cardioid/bulb perimeter,
+// ordered C0→B7 so that MIDI note % 24 selects a musically-coherent region.
+// Each point is visually distinct and interesting when zoomed.
+const MB_TARGETS = [
+  {cx:-0.750, cy: 0.000}, // C  - left valley
+  {cx:-0.720, cy: 0.188}, // C# - upper cardioid edge
+  {cx:-0.650, cy: 0.320}, // D  - upper bulge
+  {cx:-0.500, cy: 0.433}, // D# - top of cardioid
+  {cx:-0.320, cy: 0.480}, // E  - upper right cardioid
+  {cx:-0.120, cy: 0.440}, // F  - right cardioid top
+  {cx: 0.050, cy: 0.340}, // F# - right side
+  {cx: 0.200, cy: 0.150}, // G  - right cusp area
+  {cx: 0.250, cy: 0.000}, // G# - rightmost point
+  {cx: 0.200, cy:-0.150}, // A  - right lower
+  {cx: 0.050, cy:-0.340}, // A# - lower right
+  {cx:-0.120, cy:-0.440}, // B  - lower cardioid
+  {cx:-0.320, cy:-0.480}, // C' - lower left cardioid
+  {cx:-0.500, cy:-0.433}, // C#'- bottom of cardioid
+  {cx:-0.650, cy:-0.320}, // D' - lower bulge
+  {cx:-0.720, cy:-0.188}, // D#'- lower cardioid edge
+  {cx:-1.250, cy: 0.000}, // E' - period-2 bulb center
+  {cx:-1.380, cy: 0.000}, // F' - left bulb neck
+  {cx:-1.750, cy: 0.000}, // F#'- leftmost spike
+  {cx:-0.760, cy: 0.100}, // G' - upper bulb junction
+  {cx:-0.760, cy:-0.100}, // G#'- lower bulb junction
+  {cx:-1.260, cy: 0.070}, // A' - period-2 top
+  {cx:-1.260, cy:-0.070}, // A#'- period-2 bottom
+  {cx:-0.560, cy: 0.000}, // B' - cardioid center
+];
+
 // Panel visibility
 let synthVisible=true, visVisible=true;
 
@@ -2062,28 +2092,35 @@ function renderLoop(){
       const zm=parseFloat(document.getElementById('visZoom').value);
       const pc=parseFloat(document.getElementById('visPC').value);
       const lv=getLUTVec(curLUT);
-      // Mandelbrot zoom driven by dominant pitch in frequency data
+      // Mandelbrot zoom driven by active notes (MIDI / virtual keyboard / arpeggiator)
       if(curPreset===12){
-        // Detect dominant bin
-        let maxBin=0,maxVal=0;
-        const pitchEnd=Math.floor(freqData.length*0.6);
-        for(let i=2;i<pitchEnd;i++){if(freqData[i]>maxVal){maxVal=freqData[i];maxBin=i;}}
-        if(maxVal>30){
-          // Map bin → zoom level: low pitch=low zoom (wide view), high pitch=high zoom
-          const pitchNorm=maxBin/pitchEnd; // 0-1
-          mbZoomTarget=1.0+pitchNorm*pitchNorm*120.0; // 1x to 121x
-          // Map pitch to one of the interesting targets
-          const tIdx=Math.floor(pitchNorm*MB_TARGETS.length)%MB_TARGETS.length;
-          mbCxT=MB_TARGETS[tIdx].cx; mbCyT=MB_TARGETS[tIdx].cy;
+        // Find the lowest active note currently sounding
+        const activeVoices = voices.filter(v=>v.active||v.releasing);
+        if(activeVoices.length > 0){
+          // Use the lowest note for region selection, highest for zoom depth
+          const notes = activeVoices.map(v=>v.note).filter(n=>n>=0);
+          const loNote = Math.min(...notes);  // selects region (perimeter position)
+          const hiNote = Math.max(...notes);  // selects zoom depth
+
+          // Map note 0-127 to MB_TARGETS index (wraps around the perimeter)
+          const tIdx = loNote % MB_TARGETS.length;
+          mbCxT = MB_TARGETS[tIdx].cx;
+          mbCyT = MB_TARGETS[tIdx].cy;
+
+          // Zoom: middle C (60) = 8x, each semitone above multiplies by 1.07
+          // Range: C0≈1x, C4≈8x, C7≈60x, C10≈400x (clamped)
+          mbZoomTarget = Math.min(400, Math.pow(1.07, hiNote - 36));
         } else {
-          // No signal: return to full view smoothly
-          mbZoomTarget=1.0; mbCxT=-0.5; mbCyT=0.0;
+          // No notes sounding — return smoothly to full view
+          mbZoomTarget = 1.0;
+          mbCxT = -0.5;
+          mbCyT = 0.0;
         }
-        // Smooth interpolation (lerp at ~3% per frame ≈ smooth at 60fps)
-        const lf=0.03;
-        mbZoom+=(mbZoomTarget-mbZoom)*lf;
-        mbCx+=(mbCxT-mbCx)*lf;
-        mbCy+=(mbCyT-mbCy)*lf;
+        // Smooth lerp: 4% per frame when zooming in, 2% when returning (slower return feels natural)
+        const lf = mbZoomTarget > mbZoom ? 0.04 : 0.02;
+        mbZoom += (mbZoomTarget - mbZoom) * lf;
+        mbCx   += (mbCxT - mbCx) * lf;
+        mbCy   += (mbCyT - mbCy) * lf;
       }
 
       gl.uniform1f(prog.u.T,t);
@@ -2171,31 +2208,41 @@ const VK_LAYOUT = [
 ];
 
 // ── Responsive keyboard builder ────────────────────────────────
-// Computes key dimensions from available container width each time it's called.
-// VK_LAYOUT stays as the canonical 3-octave note list; we only render as many
-// octaves as fit (always at least 1 full octave + C).
+// Fixed white-key width (24px). Compute how many full octaves fit in available space,
+// then build a dynamic layout for exactly that many octaves.
+const VK_WHITE_PX = 24;  // fixed key width — more space → more octaves, not wider keys
+
 function buildVirtualKeyboard(){
   const wrap=document.getElementById('vkWrap');
   wrap.innerHTML='';
 
-  // Available width = vKeyboard width minus the controls panel (≈130px)
-  const availW = Math.max(200, document.getElementById('vKeyboard').clientWidth - 140);
-  const kbH    = 86; // white key height px (matches #vKeyboard height - 4px pad)
-
-  // Count whites in full layout
-  const allWhites = VK_LAYOUT.filter(k=>!k.b);
-  // Key width: fit all whites in availW, clamped 18–40px
-  let whiteW = Math.floor(availW / allWhites.length);
-  whiteW = Math.max(18, Math.min(40, whiteW));
-  const blackW = Math.round(whiteW * 0.6);
+  // Available width = vKeyboard width minus the controls panel (~140px)
+  const availW = Math.max(168, document.getElementById('vKeyboard').clientWidth - 144);
+  const kbH = 86;
+  const whiteW = VK_WHITE_PX;
+  const blackW = Math.round(whiteW * 0.62);
   const blackH = Math.round(kbH * 0.60);
+
+  // 1 octave = 7 white keys × whiteW px
+  const maxOctaves = Math.max(1, Math.floor(availW / (7 * whiteW)));
+
+  // Build a layout for maxOctaves octaves + final C
+  const layout = [];
+  for(let oct=0; oct<maxOctaves; oct++){
+    const base = oct * 12;
+    [0,1,2,3,4,5,6,7,8,9,10,11].forEach(s=>{
+      const isBlack = [1,3,6,8,10].includes(s);
+      layout.push({s: base+s, b: isBlack});
+    });
+  }
+  layout.push({s: maxOctaves*12, b: false}); // closing C
 
   const wContainer=document.createElement('div');
   wContainer.style.cssText='position:relative;display:flex;flex-shrink:0;';
   wrap.appendChild(wContainer);
 
-  // Build white keys
-  allWhites.forEach(k=>{
+  // White keys
+  layout.filter(k=>!k.b).forEach(k=>{
     const el=document.createElement('div');
     el.className='vk-white';
     el.style.width=whiteW+'px';
@@ -2211,21 +2258,21 @@ function buildVirtualKeyboard(){
     setupVKKey(el);
   });
 
-  // Build black keys absolutely positioned
-  VK_LAYOUT.filter(k=>k.b).forEach(k=>{
+  // Black keys — positioned absolutely
+  layout.filter(k=>k.b).forEach(k=>{
     const el=document.createElement('div');
     el.className='vk-black';
     el.style.width=blackW+'px';
     el.style.height=blackH+'px';
     el.dataset.semi=k.s;
-    const whitesBefore=VK_LAYOUT.filter(x=>!x.b&&x.s<k.s).length;
+    const whitesBefore=layout.filter(x=>!x.b&&x.s<k.s).length;
     el.style.left=(whitesBefore*whiteW - Math.round(blackW*0.5))+'px';
     wContainer.appendChild(el);
     setupVKKey(el);
   });
 }
 
-// Rebuild on window resize to maintain responsiveness
+// Rebuild on window resize
 window.addEventListener('resize', ()=>{ if(kbdVisible) buildVirtualKeyboard(); });
 
 function setupVKKey(el){
@@ -2237,6 +2284,9 @@ function setupVKKey(el){
 
   const press=async(e)=>{
     e.preventDefault();
+    // Capture pointer so pointerleave/pointerup fire on THIS element
+    // even when the pointer moves over other controls (sliders, buttons, etc.)
+    try{ el.setPointerCapture(e.pointerId); }catch(_){}
     await ensureAC();
     const note=getMIDI();
     el.classList.add('pressed');
@@ -2245,17 +2295,18 @@ function setupVKKey(el){
   };
   const release=(e)=>{
     e.preventDefault();
+    try{ el.releasePointerCapture(e.pointerId); }catch(_){}
     const note=getMIDI();
     el.classList.remove('pressed');
     releaseNote(note);
     arpHeld.delete(note);onArpNoteOff(note);
   };
 
-  el.addEventListener('pointerdown',press);
-  el.addEventListener('pointerup',release);
-  el.addEventListener('pointerleave',release);
-  el.addEventListener('touchstart',press,{passive:false});
-  el.addEventListener('touchend',release,{passive:false});
+  el.addEventListener('pointerdown', press);
+  el.addEventListener('pointerup',   release);
+  // pointercancel handles edge cases (e.g. OS gesture interrupts)
+  el.addEventListener('pointercancel', release);
+  // Do NOT add pointerleave — with capture active it fires incorrectly on drag-over
 }
 
 function vkShiftOct(dir){
